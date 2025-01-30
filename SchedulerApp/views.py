@@ -10,6 +10,9 @@ from datetime import datetime
 import numpy as np
 import os
 from django.conf import settings
+import matplotlib.pyplot as plt
+from io import BytesIO
+import time
 
 POPULATION_SIZE = 100
 NUMB_OF_ELITE_SCHEDULES = 10
@@ -322,24 +325,30 @@ class ParticleSwarmOptimization:
         self.social_coeff = social_coeff
 
     def optimize(self, population):
+        schedules = population.getSchedules()
         global_best = max(population.getSchedules(), key=lambda x: x.getFitness())
-        for schedule in population.getSchedules():
+        # Initialize personal best for each schedule
+        for schedule in schedules:
             schedule._personal_best = schedule
-            schedule._velocity = [random.uniform(-1, 1) for _ in schedule.getClasses()]
+            schedule._velocity = random.uniform(0, 1)  # Velocity for the entire schedule
 
-        for _ in range(150):  # Number of iterations
-            for schedule in population.getSchedules():
-                new_velocity = [
-                    self.inertia_weight * v +
-                    self.cognitive_coeff * random.random() * (pb.getFitness() - schedule.getFitness()) +
-                    self.social_coeff * random.random() * (global_best.getFitness() - schedule.getFitness())
-                    for v, pb in zip(schedule._velocity, schedule.getClasses())
-                ]
-                schedule._velocity = new_velocity
-                schedule._classes = [
-                    cls if random.random() > 0.5 else random.choice(data.get_meetingTimes())
-                    for cls in schedule.getClasses()
-                ]
+        for _ in range(150):  # Iterations
+                for schedule in schedules:
+                    # Update velocity for the schedule (not individual classes)
+                    new_velocity = (
+                        self.inertia_weight * schedule._velocity +
+                        self.cognitive_coeff * random.random() * (schedule._personal_best.getFitness() - schedule.getFitness()) +
+                        self.social_coeff * random.random() * (global_best.getFitness() - schedule.getFitness())
+                    )
+                    schedule._velocity = new_velocity
+
+                # Update schedule based on velocity (e.g., mutate meeting times)
+                for cls in schedule.getClasses():
+                    if random.random() < abs(schedule._velocity):
+                        # Randomly adjust meeting time
+                        new_time = random.choice(data.get_meetingTimes())
+                        cls.set_meetingTime(new_time)
+
                 if schedule.getFitness() > schedule._personal_best.getFitness():
                     schedule._personal_best = schedule
                 if schedule.getFitness() > global_best.getFitness():
@@ -384,42 +393,88 @@ def timetable(request):
     population = Population(POPULATION_SIZE)
     VARS['generationNum'] = 0
     VARS['terminateGens'] = False
-    populations = []
-    populations.append(population)
-    fitness_values = []
-    average_fitness = []
-    diversity = []
 
-    psoAlgorithm = ParticleSwarmOptimization(population_size=POPULATION_SIZE)
-    schedule = population.getSchedules()[0]
+    # Performance tracking variables
+    fitness_history = []  # Best fitness per generation
+    hard_violations_history = []  # Hard constraint violations per generation
+    soft_violations_history = []  # Soft constraint violations per generation
+    execution_times = []  # Execution time per generation
+    start_time = time.time()  # Start timer
 
-    while (schedule.getFitness() != 1.0) and (VARS['generationNum'] <= 150):
-        if VARS['terminateGens']:
-            return HttpResponse('')
+    pso = ParticleSwarmOptimization(population_size=POPULATION_SIZE)
+    best_schedule = None
 
-        population.getSchedules().sort(key=lambda x: x.getFitness(), reverse=True)
-        schedule = population.getSchedules()[0]
-        populations.append(population)
-        fitness_values.append(schedule.getFitness())
-
-        avg_fitness = sum(schedule.getFitness() for schedule in population.getSchedules()) / POPULATION_SIZE
-        average_fitness.append(avg_fitness)
-
-        unique_fitness = len(set(schedule.getFitness() for schedule in population.getSchedules()))
-        diversity.append(unique_fitness)
+    while (VARS['generationNum'] <= 150) and (not VARS['terminateGens']):
+        # Run PSO iteration
+        best_schedule = pso.optimize(population)
+        
+        # Track performance metrics
+        fitness_history.append(best_schedule.getFitness())
+        hard_violations_history.append(sum(best_schedule._hard_constraint_violations.values()))
+        soft_violations_history.append(sum(best_schedule._soft_constraint_violations.values()))
+        execution_times.append(time.time() - start_time)
 
         VARS['generationNum'] += 1
-        genes = schedule.getGenes()
-        print(f'\n> Generation #{VARS["generationNum"]}, Fitness: {schedule.getFitness()}')
-        print(f'Genes of Best Schedule: {genes}')
+        print(f"Generation {VARS['generationNum']} - Fitness: {best_schedule.getFitness()}")
 
-        break_time_slot = '10:00 - 10:50'  # The break time you want to use
-        week_days = ['Sunday','Monday', 'Tuesday', 'Wednesday', 'Thursday']  # List of weekdays
+    # Generate performance graphs
+    plt.figure(figsize=(15, 10))
     
-        teacher_colors = {}
-        instructor_names = {}
+    # Fitness Plot
+    plt.subplot(2, 2, 1)
+    plt.plot(fitness_history, color='blue', marker='o', linestyle='-')
+    plt.title('Fitness Value Over Generations')
+    plt.xlabel('Generation')
+    plt.ylabel('Fitness')
+    plt.grid(True)
 
-        for cls in schedule.getClasses():
+    # Constraint Violations Plot
+    plt.subplot(2, 2, 2)
+    plt.plot(hard_violations_history, label='Hard Constraints', color='red')
+    plt.plot(soft_violations_history, label='Soft Constraints', color='orange')
+    plt.title('Constraint Violations Over Time')
+    plt.xlabel('Generation')
+    plt.ylabel('Violations')
+    plt.legend()
+    plt.grid(True)
+
+    # Execution Time Plot
+    plt.subplot(2, 2, 3)
+    plt.plot(execution_times, color='green', marker='s', linestyle='--')
+    plt.title('Cumulative Execution Time')
+    plt.xlabel('Generation')
+    plt.ylabel('Time (seconds)')
+    plt.grid(True)
+
+    # Save plots to a buffer
+    buffer = BytesIO()
+    plt.savefig(buffer, format='png', bbox_inches='tight')
+    plt.close()
+    buffer.seek(0)
+
+    # Prepare performance summary
+    performance_summary = {
+        'fitness_values': fitness_history,
+        'hard_violations': hard_violations_history,
+        'soft_violations': soft_violations_history,
+        'execution_times': execution_times,
+        'total_time': time.time() - start_time,
+    }
+
+    # Print performance summary to console
+    print("\nPerformance Summary:")
+    print(f"Final Fitness: {fitness_history[-1]}")
+    print(f"Final Hard Violations: {hard_violations_history[-1]}")
+    print(f"Final Soft Violations: {soft_violations_history[-1]}")
+    print(f"Total Execution Time: {performance_summary['total_time']:.2f} seconds")
+
+    break_time_slot = '10:00 - 10:50'  # The break time you want to use
+    week_days = ['Sunday','Monday', 'Tuesday', 'Wednesday', 'Thursday']  # List of weekdays
+
+    teacher_colors = {}
+    instructor_names = {}
+
+    for cls in best_schedule.getClasses():
             teacher = cls.get_instructor()  # Assuming this is an instructor object
             teacher_name = teacher.name  # Ensure you're getting the correct name attribute of the instructor
         
@@ -429,17 +484,18 @@ def timetable(request):
             # Now you can store the instructor's name (or ID) for reference
             instructor_names[cls] = teacher_name
 
-        # Generate break times for all weekdays
-        break_times = [(break_time_slot, day) for day in week_days]
+    # Generate break times for all weekdays
+    break_times = [(break_time_slot, day) for day in week_days]
 
     return render(request, 'timetable.html', {
-        'schedule': schedule.getClasses(),
+        'schedule': best_schedule.getClasses(),
         'sections': data.get_sections(),
         'times': data.get_meetingTimes(),
         'timeSlots': TIME_SLOTS,
         'weekDays': DAYS_OF_WEEK,
         'break_times': break_times,
         'teacher_colors': teacher_colors,
+        'performance_graph': buffer.getvalue().decode('latin1'),  # Embed graph in response
     })
 
 def home(request):
